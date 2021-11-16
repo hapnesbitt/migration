@@ -1,0 +1,222 @@
+﻿* Migration steps
+   1. stop cronjobs on ALL systems in the cluster first
+#. comment this cronjob out
+
+   19. $ sudo su - pps
+
+
+	
+
+
+   20. $ crontab -e
+	
+
+
+   21. #* * * * * /opt/proofpoint/pps-6.3.0.356/admin/tools/dbmsgqueueprocesor.sh  > /dev/null
+	
+
+
+   22.  
+	
+
+
+   23. OR if you like this better, freeze all jobs
+	
+
+
+   24.  
+	
+
+
+   25. $ mkdir ~/current/var/lock/cronpause
+	
+
+
+   26. $ touch ~/current/var/lock/cronpause/pid
+	   2. 
+wait a few minutes for dbmsqueueprocessor to stop
+
+      27. $ tail -f ~/current/var/log/cron/dbmsgqueprocessor_<fqdn>-10000_instance1.log
+	      3. 
+also do a $ top and wait until these vanish
+         * logloader
+         * logparser
+         * logcollector etc
+         4. stop everything on the master as pps
+
+            28. $ ~/current/pps_control.sh stop
+	            5. make sure pps is fully running on the new agent (not yet attached)
+
+               29. $ ~/current/pps_control.sh status
+	               6. As user pps on the master and agent,change the PRODUCT_LEVEL parameter in $PROOFPOINT_ROOT/pps_env.sh from 1000 to 1500.
+
+                  30. $ sudo su - pps
+	
+
+
+                  31. $ cd ${PROOFPOINT_ROOT}
+	
+
+
+                  32. $ vi pps_env.sh
+	                  7. start db on master
+
+                     33. $ ~/current/pps_control.sh start db
+	                     8. start admin on master
+
+                        34. $ ~/current/pps_control.sh start admin
+	                        9. Admin UI: add new agent as Quarantine Master (QM)
+System > Servers > add agent as type "Quarantine Node"
+Tail the log to see progression
+
+                           35. $ tail -f ~/current/var/log/admind/add_agent.log
+	
+
+
+                           36. ...
+	
+
+
+                           37. should end looking like this
+	
+
+
+                           38. [2012-02-11 01:48:23.158493 -0500] info add_agent.pl:397 main::finish - Finishing add_agent at: Sat Feb 11 01:48:23 2012 total time: 515.475683
+	
+
+
+                           39. [2012-02-11 01:48:23.158966 -0500] info add_agent.pl:398 main::finish - Exiting with value: 0
+	                           10. stop admin on master after the agent QM has been added, just in case, (we don't want customer doing anything).
+
+                              40. $ ~/current/pps_control.sh stop admin
+	                              11. now check the db is started on the master (if not, start it)
+
+                                 41. $ ~/current/pps_control.sh status
+	
+
+
+                                 42.      if db is stopped, start it:  
+	
+
+
+                                 43. $ ~/current/pps_control.sh start db
+	                                 12. In ~/current/var/run on the CM is a file named digest.cfg.  This needs to exist on the new QM so it will start generating digests where the CM left off.
+No need to move the file physically as long as the contents match, so on the CM  just do this...  cat ~/current/var/run/digest.cfg and it will say something like the following...
+com.proofpoint.filter.digest.generator.timestamp.last=2012-02-13 11:00:30
+copy that and paste it into ~/current/var/run/digest.cfg on the new QM
+                                 13. netcat a dump of quarantine db to agent QM
+less I/O (scp sucks for big stuff): with netcat you can transfer as you dump...
+                                    * execute the listener first
+Agent QM (receiving):
+
+                                       * $ sudo /etc/init.d/iptables stop
+	
+
+
+                                       * $ sudo chkconfig iptables off
+	
+
+
+                                       * $ nc -l 10001 | mysql -uroot -p$(pp_pwutil.pl --decryptpw --encryptedpw `grep "db.mysql.normal.password" ~/current/admin/etc/admind/servers/self|cut -d= -f2`) -S ~/current/opt/mysql/data/mysql.sock quarantine
+	                                       * then in another window from the source master
+Master (sending):
+
+                                          * $ sudo /etc/init.d/iptables stop
+	
+
+
+                                          * $ sudo chkconfig iptables off
+	
+
+
+                                          * $ mysqldump --max_allowed_packet=512M --add-drop-database --add-locks -uroot -p$(pp_pwutil.pl --decryptpw --encryptedpw `grep "db.mysql.normal.password"~/current/admin/etc/admind/servers/self|cut -d= -f2`) -S ~/current/opt/mysql/data/mysql.sock quarantine | nc  QM_Agent -p 10001
+	                                          14. Once netcat is complete, start everything on master
+
+                                             44. $ sudo chkconfig iptables on
+	
+
+
+                                             45. $ sudo /etc/init.d/iptables start
+	
+
+
+                                             46. $ ~/current/pps_control.sh start
+	                                             15. start iptables on Agent too
+
+                                                47. $ sudo chkconfig iptables on
+	
+
+
+                                                48. $ sudo /etc/init.d/iptables start
+	                                                16. Start cronjobs on all systems
+
+                                                   49. uncomment this pps cronjob
+	
+
+
+                                                   50.  
+	
+
+
+                                                   51. $crontab -e
+	
+
+
+                                                   52. * * * * * /opt/proofpoint/pps-6.3.0.356/admin/tools/dbmsgqueueprocesor.sh  > /dev/null
+	
+
+
+                                                   53.  
+	
+
+
+                                                   54. OR if you used that method in step 1,
+	
+
+
+                                                   55.  
+	
+
+
+                                                   56. $ rm -f ~/current/var/lock/cronpause/pid
+	                                                   17. QA on Agent QM
+#.verify they consolidate by tailing logs
+
+                                                      57. $ tail -f ~/current/var/log/cron/dbmsgqueprocessor_<fqdn>-10000_instance1.log
+	                                                      * Verify new messages are visible in UI, coming into the quarantine folders
+                                                      * Verify the quarantine size is growing on the QM but not on the CM
+
+                                                         * $ du -sh ~/current/opt/mysql/data/quarantine  (on both the new QM and the CM, QM should be bigger and growing).
+	                                                         18. Clean up database on CM - don't do this until you're absolutely sure data is going to the QM, in fact it won't hurt anything to leave it for a few days to be sure.
+                                                         * On the CM, list/identify the biggest tables you'll want to clean up to free up space
+
+                                                            * $ ls -lhtS ~/current/opt/mysql/data/quarantine |head -11
+	                                                            * login to mysql on the CM
+
+                                                               * $ mysql -uroot -p$(pp_pwutil.pl --decryptpw --encryptedpw `grep "db.mysql.normal.password" ~/current/admin/etc/admind/servers/self|cut -d= -f2`) -S ~/current/opt/mysql/data/mysql.sock
+	
+
+
+                                                               * mysql> use quarantine;
+	
+
+
+                                                               * mysql> truncate table TABLENAME;
+	                                                               * 
+substitute TABLENAME with the tables returned in your ls -lhtS
+                                                                  * 
+Troubleshooting
+                                                                     1. Add agent (UI) Error: Unable to acquire deploy lock. An upgrade or deploy may be in progress.
+#. check
+
+                                                                        2. [~/current/var/lock|~/current/var/lock]$ ls
+	
+
+
+                                                                        3. addagent.lock
+	
+
+that lock file got left behind when a previous agent addition "failed": only rm it if the add has actually failed, and it has not cleared that out by itself
+Additional info
+https://support.proofpoint.com/documentation.cgi?version=6.3.0&doc=proofpoint_reference.pdf
+https://support.proofpoint.com/documentation.cgi?version=6.3.0&doc=proofpoint_reference.pdfhttps://wiki.proofpoint.com/wiki/display/SPT/Quarantine+Consolidation
